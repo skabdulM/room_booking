@@ -38,7 +38,7 @@ frappe.ui.form.on("Room Booking", {
 					meeting_room: frm.doc.meeting_room,
 					booking_date: frm.doc.booking_date,
 				},
-				freeze: true, // Blocks UI while loading
+				freeze: true,
 				freeze_message: __("Checking Availability..."),
 				callback: function (r) {
 					var slots = r.message || [];
@@ -48,8 +48,6 @@ frappe.ui.form.on("Room Booking", {
 						return;
 					}
 
-					// 3. Render Table using Template Literals
-					// We use standard Frappe classes: table, table-bordered, table-hover
 					let table_html = `
                         <div class="table-responsive">
                             <table class="table table-bordered table-hover table-striped">
@@ -75,14 +73,13 @@ frappe.ui.form.on("Room Booking", {
                         </div>
                     `;
 
-					// 4. Show Dialog
 					var d = new frappe.ui.Dialog({
 						title: __("Available Slots"),
 						fields: [
 							{
 								fieldtype: "HTML",
 								fieldname: "slots_table",
-								options: table_html, // Inject the table directly
+								options: table_html,
 							},
 						],
 						primary_action_label: __("Close"),
