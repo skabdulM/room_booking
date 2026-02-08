@@ -83,7 +83,7 @@ app_license = "mit"
 # ------------
 
 # before_install = "room_booking.install.before_install"
-# after_install = "room_booking.install.after_install"
+after_install = "room_booking.setup.install.after_install"
 
 # Uninstallation
 # ------------
@@ -247,3 +247,4 @@ app_license = "mit"
 # List of apps whose translatable strings should be excluded from this app's translations.
 # ignore_translatable_strings_from = []
 
+fixtures = [{"dt": "Role", "filters": [["name", "=", "Office User"]]}]
