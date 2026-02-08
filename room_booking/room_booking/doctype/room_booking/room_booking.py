@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Abdul Mannan Shaikh and contributors
 # For license information, please see license.txt
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import frappe
 from frappe.model.document import Document
@@ -44,11 +44,9 @@ class RoomBooking(Document):
 		work_start = get_time("09:00:00")
 		work_end = get_time("18:00:00")
 
-		# Convert doc times to comparable objects
 		booking_start = get_time(self.start_time)
 		booking_end = get_time(self.end_time)
 
-		# CHANGED: Use msgprint instead of throw to allow saving
 		if booking_start < work_start or booking_end > work_end:
 			frappe.msgprint(
 				"Note: This booking is outside standard working hours (09:00 AM - 06:00 PM).",
@@ -60,7 +58,10 @@ class RoomBooking(Document):
 		if getdate(self.booking_date) < getdate():
 			frappe.throw("Booking Date cannot be in the past")
 
-		if self.start_time >= self.end_time:
+		start_time = get_time(self.start_time)
+		end_time = get_time(self.end_time)
+
+		if start_time >= end_time:
 			frappe.throw("End time must be after start time")
 
 	def check_overlaps(self):
@@ -69,6 +70,14 @@ class RoomBooking(Document):
 				"Meeting Room, Booking Date, Start Time and End Time must be set to check for overlaps"
 			)
 
+		def get_dt(date_val, time_val):
+			date_obj = getdate(date_val)
+			time_obj = get_time(time_val)
+			return datetime.combine(date_obj, time_obj)
+
+		current_start_dt = get_dt(self.booking_date, self.start_time)
+		current_end_dt = get_dt(self.booking_date, self.end_time)
+
 		filters = {
 			"meeting_room": self.meeting_room,
 			"booking_date": self.booking_date,
@@ -76,60 +85,75 @@ class RoomBooking(Document):
 			"name": ["!=", self.name],
 		}
 
-		existing = frappe.get_all("Room Booking", filters=filters, fields=["name", "start_time", "end_time"])
+		existing = frappe.get_all(
+			"Room Booking", filters=filters, fields=["name", "start_time", "end_time", "booked_by"]
+		)
 
 		for ex in existing:
-			ex_start = get_time_str(ex.start_time)
-			ex_end = get_time_str(ex.end_time)
-			start_time_str = get_time_str(self.start_time)
-			end_time_str = get_time_str(self.end_time)
+			ex_start_dt = get_dt(self.booking_date, ex.start_time)
+			ex_end_dt = get_dt(self.booking_date, ex.end_time)
 
-			if start_time_str < ex_end and end_time_str > ex_start:
-				frappe.throw(f"Time overlaps with existing booking {ex.name} ({ex_start} - {ex_end})")
+			if current_start_dt < ex_end_dt and current_end_dt > ex_start_dt:
+				formatted_start = ex_start_dt.strftime("%I:%M %p")
+				formatted_end = ex_end_dt.strftime("%I:%M %p")
+
+				frappe.throw(
+					f"This room is already booked from <b>{formatted_start}</b> to <b>{formatted_end}</b> by {ex.booked_by}.<br>Please choose a different time.",  # noqa: RUF100
+					title="Slot Unavailable",
+				)
 
 
 @frappe.whitelist()
 def get_available_slots(meeting_room, booking_date):
-	WORK_START_STR = get_time("09:00:00")
-	WORK_END_STR = get_time("18:00:00")
-	SLOT_MINUTES = 60
+	WORK_START_STR = "09:00:00"
+	WORK_END_STR = "18:00:00"
+	DURATION_MINUTES = 60
+
 	booking_date = getdate(booking_date)
 
-	current_time = datetime.combine(booking_date, WORK_START_STR)
-	work_end_dt = datetime.combine(booking_date, WORK_END_STR)
+	work_start_dt = datetime.combine(booking_date, get_time(WORK_START_STR))
+	work_end_dt = datetime.combine(booking_date, get_time(WORK_END_STR))
 
-	existing_bookings = frappe.get_all(
+	bookings_data = frappe.get_all(
 		"Room Booking",
 		filters={"meeting_room": meeting_room, "booking_date": booking_date, "status": ["!=", "Cancelled"]},
 		fields=["start_time", "end_time"],
 		order_by="start_time asc",
 	)
 
+	existing_bookings = []
+	for b in bookings_data:
+		existing_bookings.append(
+			{
+				"start": datetime.combine(booking_date, get_time(b.start_time)),
+				"end": datetime.combine(booking_date, get_time(b.end_time)),
+			}
+		)
+
 	available_slots = []
+	current_time = work_start_dt
 
-	while time_diff_in_seconds(work_end_dt, current_time) >= (SLOT_MINUTES * 60):
-		proposed_end = add_to_date(current_time, minutes=SLOT_MINUTES, as_datetime=True)
+	while current_time < work_end_dt:
+		proposed_end = add_to_date(current_time, minutes=DURATION_MINUTES)
 
-		overlap_found = False
-		next_start_time = None
+		if proposed_end > work_end_dt:
+			break
+
+		is_available = True
+		earliest_blocking_end = None
 
 		for booking in existing_bookings:
-			b_start_dt = add_to_date(
-				booking_date, seconds=booking.start_time.total_seconds(), as_datetime=True
-			)
-			b_end_dt = add_to_date(booking_date, seconds=booking.end_time.total_seconds(), as_datetime=True)
+			if current_time < booking["end"] and proposed_end > booking["start"]:
+				is_available = False
+				if earliest_blocking_end is None or booking["end"] < earliest_blocking_end:
+					earliest_blocking_end = booking["end"]
 
-			if current_time < b_end_dt and proposed_end > b_start_dt:
-				overlap_found = True
-				next_start_time = b_end_dt
-				break
-
-		if overlap_found:
-			current_time = next_start_time
-		else:
+		if is_available:
 			available_slots.append(
 				{"start": current_time.strftime("%H:%M"), "end": proposed_end.strftime("%H:%M")}
 			)
-			current_time = add_to_date(current_time, minutes=SLOT_MINUTES, as_datetime=True)
+			current_time = proposed_end
+		else:
+			current_time = earliest_blocking_end
 
 	return available_slots
