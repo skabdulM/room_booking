@@ -131,6 +131,9 @@ The app exposes a whitelisted endpoint to fetch available time slots.
 2. **Capacity Warning**: Book a room with capacity 5 for 8 attendees. System should show an orange warning.
 3. **Permissions**: Log in as a standard user and try to delete a booking created by another user. System should block the action.
 
+## Demo 
+https://github.com/user-attachments/assets/c83cc6ab-4a64-432c-a811-dbfdceff8aa6
+
 ## 📜 License
 
 MIT License.
