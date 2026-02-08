@@ -11,12 +11,6 @@ A custom Frappe application for managing office meeting room bookings efficientl
 * **Work Hours Validation**: Ensures bookings are within office hours (09:00 AM - 06:00 PM).
 * **Date Validation**: Prevents booking for past dates or invalid time ranges (End Time < Start Time).
 
-
-* **Role-Based Access**:
-* **Office User**: Can view all bookings but only edit/delete their own.
-* **System Manager**: Full access to all bookings and reports.
-
-
 * **Utilization Report**: A script report to analyze room usage, total hours booked, and unique users.
 * **Public API**: Whitelisted endpoint to fetch available time slots for external integrations.
 
