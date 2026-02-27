@@ -7,7 +7,7 @@
 # ─────────────────────────────────────────────────────────────────
 ARG FRAPPE_PATH=https://github.com/frappe/frappe
 ARG FRAPPE_BRANCH=version-15
-ARG PYTHON_VERSION=3.12.7
+ARG PYTHON_VERSION=3.11.6
 ARG NODE_VERSION=18.20.4
 ARG APPS_JSON_BASE64
 
