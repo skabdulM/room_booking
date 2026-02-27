@@ -7,14 +7,15 @@ on:
   workflow_dispatch:
 
 env:
-  IMAGE_NAME: brand_club
+  # Pulling image name from secrets now
+  IMAGE_NAME: ${{ secrets.DOCKER_IMAGE_NAME }}
   ENVIRONMENT: develop
 
 jobs:
   build-and-deploy:
     name: Build & Deploy to DEV
     runs-on: ubuntu-latest
-    environment: development
+    environment: Deploy
 
     steps:
       - name: Checkout code
@@ -28,6 +29,7 @@ jobs:
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
+          # Note: Ensure these secrets are defined in GitHub Settings > Secrets > Actions
           registry: ${{ secrets.DOCKER_REGISTRY_URL }}
           username: ${{ secrets.DOCKER_REGISTRY_USERNAME }}
           password: ${{ secrets.DOCKER_REGISTRY_TOKEN }}
@@ -42,14 +44,18 @@ jobs:
       - name: Load versions from build.env
         id: versions
         run: |
-          source ci/build.env
-          echo "FRAPPE_VERSION=${FRAPPE_VERSION}" >> $GITHUB_OUTPUT
-          echo "PYTHON_VERSION=${PYTHON_VERSION}" >> $GITHUB_OUTPUT
-          echo "NODE_VERSION=${NODE_VERSION}" >> $GITHUB_OUTPUT
+          if [ -f "ci/build.env" ]; then
+            source ci/build.env
+            echo "FRAPPE_VERSION=${FRAPPE_VERSION}" >> $GITHUB_OUTPUT
+            echo "PYTHON_VERSION=${PYTHON_VERSION}" >> $GITHUB_OUTPUT
+            echo "NODE_VERSION=${NODE_VERSION}" >> $GITHUB_OUTPUT
+          else
+            echo "ERROR: ci/build.env not found!"
+            exit 1
+          fi
 
       - name: Prepare apps.json
         run: |
-          # Use development-specific apps configuration
           if [ -f "ci/apps-develop.json" ]; then
             cp ci/apps-develop.json ci/apps.json
           elif [ -f "ci/apps.json" ]; then
@@ -58,10 +64,6 @@ jobs:
             echo "ERROR: No apps.json found!"
             exit 1
           fi
-
-          # Display apps that will be installed
-          echo "Apps to be installed:"
-          cat ci/apps.json
 
       - name: Encode apps.json to base64
         id: encode
@@ -88,42 +90,19 @@ jobs:
           cache-to: type=inline
           labels: |
             org.opencontainers.image.title=Brand Club DEV
-            org.opencontainers.image.description=Brand Club Frappe App - Development
             org.opencontainers.image.version=develop
             org.opencontainers.image.created=${{ steps.meta.outputs.BUILD_DATE }}
             org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.source=${{ github.repositoryUrl }}
-
-      # - name: Trigger Portainer Webhook
-      #   if: success()
-      #   run: |
-      #     echo "Triggering Portainer webhook for roombookin-dev stack..."
-      #     curl -X POST "${{ secrets.PORTAINER_WEBHOOK_DEV }}" || {
-      #       echo "WARNING: Portainer webhook failed. Stack may need manual update."
-      #       exit 0
-      #     }
-      #     echo "Deployment triggered successfully!"
 
       - name: Deployment Summary
         if: success()
         run: |
           echo "### :rocket: Deployment Successful!" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Environment:** Development" >> $GITHUB_STEP_SUMMARY
-          echo "**Branch:** develop" >> $GITHUB_STEP_SUMMARY
-          echo "**Commit:** ${{ steps.meta.outputs.COMMIT_SHA }}" >> $GITHUB_STEP_SUMMARY
           echo "**Image:** ${{ secrets.DOCKER_REGISTRY_URL }}/${{ secrets.DOCKER_ORG }}/${{ env.IMAGE_NAME }}:develop" >> $GITHUB_STEP_SUMMARY
-          echo "**Stack:** roombookin-dev" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "The development stack should update automatically within 1-2 minutes." >> $GITHUB_STEP_SUMMARY
 
       - name: Notify on failure
         if: failure()
         run: |
           echo "### :x: Deployment Failed!" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Environment:** Development" >> $GITHUB_STEP_SUMMARY
-          echo "**Branch:** develop" >> $GITHUB_STEP_SUMMARY
-          echo "**Commit:** ${{ steps.meta.outputs.COMMIT_SHA }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Please check the logs for details." >> $GITHUB_STEP_SUMMARY
+          echo "Check the 'Log in to GitHub Container Registry' or 'Build' steps for credential errors." >> $GITHUB_STEP_SUMMARY
