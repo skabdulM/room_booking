@@ -30,17 +30,9 @@ RUN bench init \
 WORKDIR /home/frappe/frappe-bench
 
 # Decode and install apps from apps.json
-# Decode and fetch apps from apps.json
 RUN if [ -n "${APPS_JSON_BASE64}" ]; then \
     echo "${APPS_JSON_BASE64}" | base64 -d > /tmp/apps.json && \
-    echo "import json, subprocess" > /tmp/install.py && \
-    echo "for app in json.load(open('/tmp/apps.json')):" >> /tmp/install.py && \
-    echo "    cmd = ['bench', 'get-app']" >> /tmp/install.py && \
-    echo "    if app.get('branch'): cmd.extend(['--branch', app['branch']])" >> /tmp/install.py && \
-    echo "    cmd.append(app.get('url'))" >> /tmp/install.py && \
-    echo "    print(f'Fetching app...')" >> /tmp/install.py && \
-    echo "    subprocess.run(cmd, check=True)" >> /tmp/install.py && \
-    python3 /tmp/install.py; \
+    bench install apps /tmp/apps.json; \
     fi
 
 # Final stage
