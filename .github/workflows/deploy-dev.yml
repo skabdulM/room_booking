@@ -16,7 +16,7 @@ jobs:
   build-and-deploy:
     name: Build & Deploy
     runs-on: ubuntu-latest
-    environment: ${{ github.ref_name == 'main' && 'production' || github.ref_name }}
+    environment: Deploy
 
     steps:
       - name: Checkout code
