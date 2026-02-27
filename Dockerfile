@@ -3,6 +3,11 @@
 # ─────────────────────────────────────────────────────────────────
 # Build args — CI passes these via --build-arg.
 # Defaults here are for local manual builds only.
+#
+# NOTE: Python 3.12 and Node 18 are intentionally pinned for
+#       Frappe version-15 compatibility.
+#       Frappe v16 uses Python 3.14 / Node 24 — do NOT upgrade
+#       these until you migrate to version-16.
 # ─────────────────────────────────────────────────────────────────
 ARG PYTHON_VERSION=3.12.7
 ARG NODE_VERSION=18.20.4
@@ -17,8 +22,17 @@ ARG WKHTMLTOPDF_DISTRO=bookworm
 # ═════════════════════════════════════════════════════════════════
 # STAGE 1: base
 # Slim Python image with ONLY runtime dependencies.
-# No compiler, no build headers, no NVM cache.
-# This is what the final image is built from — keep it lean.
+# No compiler, no build headers, no NVM build cache.
+# This is the foundation for both the builder and final stages —
+# keep it as lean as possible.
+#
+# Changes vs previous:
+#   + chromium-headless-shell  (Chromium PDF alongside wkhtmltopdf)
+#   + restic + gpg             (built-in backup capability)
+#   + file                     (MIME-type detection at runtime)
+#   + media-types              (replaces mime-support — updated pkg)
+#   + less                     (pager utility, expected by bench CLI)
+#   + NVM .bashrc entries      (nvm works in interactive shells too)
 # ═════════════════════════════════════════════════════════════════
 FROM python:${PYTHON_VERSION}-slim-${DEBIAN_BASE} AS base
 
@@ -35,24 +49,34 @@ COPY resources/*.sh /usr/local/bin/
 RUN useradd -ms /bin/bash frappe \
     && apt-get update \
     && apt-get install --no-install-recommends -y \
+        # Core utilities
         curl \
         git \
         vim \
+        less \
+        file \
+        # Web server
         nginx \
         gettext-base \
-        mime-support \
-        # WeasyPrint runtime (PDF generation)
+        # MIME type detection (replaces mime-support)
+        media-types \
+        # WeasyPrint runtime (PDF via HTML/CSS renderer)
         libpango-1.0-0 \
         libharfbuzz0b \
         libpangoft2-1.0-0 \
         libpangocairo-1.0-0 \
-        # Fonts
+        # CJK font support
         fonts-noto-cjk \
-        # DB clients — runtime only, NOT dev headers (those stay in builder)
+        # Chromium PDF (alternative to wkhtmltopdf for newer Frappe)
+        chromium \
+        # Backup tooling
+        restic \
+        gpg \
+        # DB clients — runtime libs only (no dev headers; those stay in build stage)
         mariadb-client \
         libpq5 \
         postgresql-client \
-        # Healthcheck / utilities
+        # Healthcheck / process utilities
         wait-for-it \
         jq \
     # ── Node via NVM ─────────────────────────────────────────────
@@ -65,7 +89,11 @@ RUN useradd -ms /bin/bash frappe \
     && nvm alias default v${NODE_VERSION} \
     # Remove NVM download cache — not needed at runtime
     && rm -rf ${NVM_DIR}/.cache \
-    # ── wkhtmltopdf ──────────────────────────────────────────────
+    # Make nvm available in interactive shells (bash / bench exec sessions)
+    && echo 'export NVM_DIR="/home/frappe/.nvm"'                                           >>/home/frappe/.bashrc \
+    && echo '[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"'                            >>/home/frappe/.bashrc \
+    && echo '[ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"'          >>/home/frappe/.bashrc \
+    # ── wkhtmltopdf (patched Qt — required for Frappe v15 PDF) ───
     && if [ "$(uname -m)" = "aarch64" ]; then ARCH=arm64; else ARCH=amd64; fi \
     && DEB=wkhtmltox_${WKHTMLTOPDF_VERSION}.${WKHTMLTOPDF_DISTRO}_${ARCH}.deb \
     && curl -sLO https://github.com/wkhtmltopdf/packaging/releases/download/${WKHTMLTOPDF_VERSION}/${DEB} \
@@ -86,28 +114,32 @@ RUN useradd -ms /bin/bash frappe \
         /run/nginx.pid \
     && chmod 755 /usr/local/bin/*.sh \
     && chmod 644 /templates/nginx/frappe.conf.template \
-    # ── final cleanup ─────────────────────────────────────────────
+    # ── cleanup ───────────────────────────────────────────────────
     && rm -rf /var/lib/apt/lists/* \
     && rm -f /etc/nginx/sites-enabled/default
 
 
 # ═════════════════════════════════════════════════════════════════
-# STAGE 2: builder
-# Inherits base + adds build-only packages.
-# Only /home/frappe/frappe-bench is copied to final — everything
-# else in this stage is discarded automatically by Docker.
+# STAGE 2: build
+# base + apt build-only packages.
+#
+# WHY a separate stage from builder?
+#   Separating "install apt build tools" from "run bench init"
+#   gives Docker a stable cached layer for the apt step.
+#   When only your app code changes, the apt layer is a cache hit
+#   and only bench init re-runs — saving several minutes per CI build.
+#
+#   This is the key structural improvement from Frappe's v16 approach.
+#   Nothing in this stage reaches the final image.
 # ═════════════════════════════════════════════════════════════════
-FROM base AS builder
-
-ARG FRAPPE_PATH
-ARG FRAPPE_BRANCH
-ARG PYTHON_VERSION
-ARG APPS_JSON_BASE64
+FROM base AS build
 
 USER root
 
-# Build tools — compiler, headers for native Python extensions.
-# These are NOT in the final image (they stay in this stage only).
+# Build tools — compiler + headers for native Python extensions.
+# libpq-dev   → compile psycopg2 from source
+# libmariadb-dev → compile mysqlclient from source
+# All of these are DISCARDED after builder stage — NOT in final image.
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y \
         wget \
@@ -120,15 +152,35 @@ RUN apt-get update \
         libsasl2-dev \
         libtiff5-dev \
         libwebp-dev \
-        # Needed to compile mysqlclient / psycopg2 from source
         libpq-dev \
         libmariadb-dev \
+        pkg-config \
         redis-tools \
         rlwrap \
         tk8.6-dev \
+        cron \
     && rm -rf /var/lib/apt/lists/*
 
-# Write apps.json before switching to frappe user (no write access to /opt)
+USER frappe
+
+
+# ═════════════════════════════════════════════════════════════════
+# STAGE 3: builder
+# Inherits build (apt tools already cached) + runs bench init.
+# Only /home/frappe/frappe-bench is copied to the final stage —
+# everything else here is discarded by Docker automatically.
+# ═════════════════════════════════════════════════════════════════
+FROM build AS builder
+
+ARG FRAPPE_PATH
+ARG FRAPPE_BRANCH
+ARG PYTHON_VERSION
+ARG APPS_JSON_BASE64
+
+USER root
+
+# Decode apps.json as root before switching to frappe user.
+# (frappe user has no write access to /opt)
 RUN if [ -n "${APPS_JSON_BASE64}" ]; then \
         mkdir -p /opt/frappe && \
         echo "${APPS_JSON_BASE64}" | base64 -d > /opt/frappe/apps.json; \
@@ -136,8 +188,15 @@ RUN if [ -n "${APPS_JSON_BASE64}" ]; then \
 
 USER frappe
 
-# bench init clones frappe + all apps in one pass via --apps_path.
-# Note: "bench install apps" does NOT exist — apps_path is the correct way.
+# bench init clones frappe + all custom apps in one pass via --apps_path.
+#
+# --python flag is REQUIRED for Frappe v15 to select the correct venv binary.
+# (Frappe v16 dropped this requirement — do not remove it until you upgrade.)
+#
+# After init, aggressively shrink the bench before the COPY to final:
+#   .git dirs       → 300–500 MB on multi-app builds, useless at runtime
+#   __pycache__     → regenerated on first import anyway
+#   pip in venv     → pip is a build tool, not needed at runtime
 RUN export APP_INSTALL_ARGS="" && \
     if [ -n "${APPS_JSON_BASE64}" ]; then \
         export APP_INSTALL_ARGS="--apps_path=/opt/frappe/apps.json"; \
@@ -151,49 +210,55 @@ RUN export APP_INSTALL_ARGS="" && \
         --skip-redis-config-generation \
         --verbose \
         /home/frappe/frappe-bench \
-    # ── Shrink the bench before copying to final stage ───────────
-    # .git dirs: 300-500MB on multi-app builds
     && find /home/frappe/frappe-bench/apps -mindepth 1 -name ".git" -type d \
        | xargs rm -rf \
-    # __pycache__ in virtualenv
     && find /home/frappe/frappe-bench/env -name "__pycache__" -type d \
        | xargs rm -rf \
-    # pip itself inside the venv (not needed at runtime)
     && find /home/frappe/frappe-bench/env/lib -name "pip" -type d \
        | xargs rm -rf \
     && echo "{}" > /home/frappe/frappe-bench/sites/common_site_config.json
 
 
 # ═════════════════════════════════════════════════════════════════
-# STAGE 3: final (backend)
-# Clean base image + only the built bench copied across.
-# Result: slim runtime image with no compiler or build headers.
+# STAGE 4: backend (final)
+# Clean base image + only the built bench copied from builder.
+# Result: slim runtime image — no compiler, no build headers,
+#         no .git history, no pip tooling.
 # ═════════════════════════════════════════════════════════════════
 FROM base AS backend
 
 USER frappe
+
+# Discourage exec-ing into production containers for ad-hoc changes.
+# Mirrors Frappe's v16 convention; harmless but a good reminder.
+RUN echo 'echo "Commands restricted in production container. Read the FAQ before proceeding."' \
+    >> /home/frappe/.bashrc
 
 COPY --from=builder --chown=frappe:frappe \
     /home/frappe/frappe-bench /home/frappe/frappe-bench
 
 WORKDIR /home/frappe/frappe-bench
 
+# sites       — shared volume for site files, configs, private uploads
+# sites/assets — static asset bundle (served by nginx; separate for clarity)
+# logs        — bench + gunicorn + worker logs
 VOLUME [ \
     "/home/frappe/frappe-bench/sites", \
+    "/home/frappe/frappe-bench/sites/assets", \
     "/home/frappe/frappe-bench/logs" \
 ]
 
 # ── Healthcheck ───────────────────────────────────────────────────
-# Check TCP port is open — NOT HTTP status code.
+# TCP port check — NOT HTTP status code.
 #
-# Why NOT "curl -f http://localhost:8000":
-#   With no Frappe site yet, gunicorn returns 404/500 → curl -f exits 1
-#   → Docker marks unhealthy → kills container → "Complete" in Swarm logs
-#   → site creation never happens (exactly what you saw).
+# DO NOT use "curl -f http://localhost:8000":
+#   Before a site is created, gunicorn returns 404/500 → curl -f exits 1
+#   → Docker marks unhealthy → kills container before site creation runs.
 #
-# Why TCP check works:
-#   The port is open as soon as gunicorn binds, regardless of site state.
-#   start-period=180s covers slow first boot + --preload worker startup.
+# TCP check: port is open as soon as gunicorn binds, regardless of site state.
+# start-period=180s covers slow first boot and --preload worker startup time.
+#
+# Uncomment once your deployment is stable and sites are pre-created:
 # HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=5 \
 #     CMD bash -c 'cat /dev/null > /dev/tcp/localhost/8000' || exit 1
 
