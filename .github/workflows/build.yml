@@ -1,0 +1,262 @@
+name: Build & Push Docker Image
+
+# ─────────────────────────────────────────────────────────────────
+# Branch strategy:
+#   develop  →  image tag: develop  (auto on every push)
+#   staging  →  image tag: staging  (auto on every push)
+#   prod     →  image tag: <git-tag> + latest  (on semver tag push, e.g. v1.2.3)
+#
+# Pull Requests to develop or staging → run tests only, no build
+# ─────────────────────────────────────────────────────────────────
+
+on:
+  push:
+    branches:
+      - develop
+      - staging
+      - prod
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"   # e.g. v1.2.3 — triggers versioned prod image
+  pull_request:
+    branches:
+      - develop
+      - staging
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}   # e.g. brandclub/brand-club-erp
+
+# ─────────────────────────────────────────────────────────────────
+# Permissions needed for GHCR push
+# ─────────────────────────────────────────────────────────────────
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+
+  # ───────────────────────────────────────────────────────────────
+  # JOB 1 — Code quality checks (PRs only)
+  # ───────────────────────────────────────────────────────────────
+  # test:
+  #   name: Code Quality
+  #   runs-on: ubuntu-latest
+  #   if: github.event_name == 'pull_request'
+
+  #   steps:
+  #     - name: Checkout code
+  #       uses: actions/checkout@v4
+
+  #     - name: Set up Python
+  #       uses: actions/setup-python@v5
+  #       with:
+  #         python-version: "3.11"
+  #         cache: pip
+
+  #     - name: Install dependencies
+  #       run: |
+  #         pip install pre-commit
+  #         # Uncomment if you have a requirements-ci file:
+  #         # pip install -r requirements-ci.txt
+
+  #     - name: Run pre-commit hooks
+  #       run: pre-commit run --color=always --all-files
+
+
+  # ───────────────────────────────────────────────────────────────
+  # JOB 2 — Build & push: develop branch
+  # Triggers: push to develop
+  # Tag produced: ghcr.io/org/repo:develop
+  # ───────────────────────────────────────────────────────────────
+  build-develop:
+    name: Build (develop)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Load build environment
+        # ci/build.env sets FRAPPE_BRANCH, PYTHON_VERSION, NODE_VERSION
+        run: |
+          source ./ci/build.env
+          echo "FRAPPE_BRANCH=$FRAPPE_BRANCH"   >> $GITHUB_ENV
+          echo "PYTHON_VERSION=$PYTHON_VERSION" >> $GITHUB_ENV
+          echo "NODE_VERSION=$NODE_VERSION"     >> $GITHUB_ENV
+
+      - name: Prepare apps.json (develop)
+        # apps-develop.json points app branches at 'develop'/'version-15' etc.
+        run: |
+          echo "APPS_JSON_BASE64=$(base64 -w 0 ./ci/apps-develop.json)" >> $GITHUB_ENV
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          # Cache layers in GHCR to speed up subsequent builds
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:cache-develop
+          cache-to:   type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:cache-develop,mode=max
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:develop
+          build-args: |
+            FRAPPE_PATH=https://github.com/frappe/frappe
+            FRAPPE_BRANCH=${{ env.FRAPPE_BRANCH }}
+            PYTHON_VERSION=${{ env.PYTHON_VERSION }}
+            NODE_VERSION=${{ env.NODE_VERSION }}
+            APPS_JSON_BASE64=${{ env.APPS_JSON_BASE64 }}
+
+      # ── Portainer webhook — trigger re-deploy of dev stack ────
+      # Uncomment once Portainer webhooks are configured.
+      # Get the webhook URL from Portainer → Stacks → <stack> → Webhook
+      #
+      # - name: Trigger Portainer redeploy (dev)
+      #   run: |
+      #     curl -s -X POST "${{ secrets.PORTAINER_WEBHOOK_DEV }}"
+
+
+  # ───────────────────────────────────────────────────────────────
+  # JOB 3 — Build & push: staging branch
+  # Triggers: push to staging
+  # Tag produced: ghcr.io/org/repo:staging
+  # ───────────────────────────────────────────────────────────────
+  build-staging:
+    name: Build (staging)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/staging'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Load build environment
+        run: |
+          source ./ci/build.env
+          echo "FRAPPE_BRANCH=$FRAPPE_BRANCH"   >> $GITHUB_ENV
+          echo "PYTHON_VERSION=$PYTHON_VERSION" >> $GITHUB_ENV
+          echo "NODE_VERSION=$NODE_VERSION"     >> $GITHUB_ENV
+
+      - name: Prepare apps.json (staging)
+        run: |
+          echo "APPS_JSON_BASE64=$(base64 -w 0 ./ci/apps-staging.json)" >> $GITHUB_ENV
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:cache-staging
+          cache-to:   type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:cache-staging,mode=max
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:staging
+          build-args: |
+            FRAPPE_PATH=https://github.com/frappe/frappe
+            FRAPPE_BRANCH=${{ env.FRAPPE_BRANCH }}
+            PYTHON_VERSION=${{ env.PYTHON_VERSION }}
+            NODE_VERSION=${{ env.NODE_VERSION }}
+            APPS_JSON_BASE64=${{ env.APPS_JSON_BASE64 }}
+
+      # - name: Trigger Portainer redeploy (staging)
+      #   run: |
+      #     curl -s -X POST "${{ secrets.PORTAINER_WEBHOOK_STAGING }}"
+
+
+  # ───────────────────────────────────────────────────────────────
+  # JOB 4 — Build & push: production (version tag)
+  # Triggers: git tag matching v*.*.* pushed to prod branch
+  # Tags produced:
+  #   ghcr.io/org/repo:1.2.3   (semver without the 'v')
+  #   ghcr.io/org/repo:latest
+  # ───────────────────────────────────────────────────────────────
+  build-prod:
+    name: Build (prod / release)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract version from tag
+        # Strips the leading 'v': tag v1.2.3 → VERSION=1.2.3
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_ENV
+
+      - name: Load build environment
+        run: |
+          source ./ci/build.env
+          echo "FRAPPE_BRANCH=$FRAPPE_BRANCH"   >> $GITHUB_ENV
+          echo "PYTHON_VERSION=$PYTHON_VERSION" >> $GITHUB_ENV
+          echo "NODE_VERSION=$NODE_VERSION"     >> $GITHUB_ENV
+
+      - name: Prepare apps.json (prod)
+        run: |
+          echo "APPS_JSON_BASE64=$(base64 -w 0 ./ci/apps-prod.json)" >> $GITHUB_ENV
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:cache-prod
+          cache-to:   type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:cache-prod,mode=max
+          # Pushes both the exact version tag and :latest
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.VERSION }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          build-args: |
+            FRAPPE_PATH=https://github.com/frappe/frappe
+            FRAPPE_BRANCH=${{ env.FRAPPE_BRANCH }}
+            PYTHON_VERSION=${{ env.PYTHON_VERSION }}
+            NODE_VERSION=${{ env.NODE_VERSION }}
+            APPS_JSON_BASE64=${{ env.APPS_JSON_BASE64 }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Brand Club ERP ${{ env.VERSION }}"
+          body: |
+            ## Release ${{ env.VERSION }}
+
+            Docker image: `ghcr.io/${{ github.repository }}:${{ env.VERSION }}`
+
+            ### Deployment
+            Update `TAG_NAME` in your Portainer stack environment variables to `${{ env.VERSION }}`
+            or run: `docker service update --image ghcr.io/${{ github.repository }}:${{ env.VERSION }} <stack>_backend`
+          draft: false
+          prerelease: false
+
+      # - name: Trigger Portainer redeploy (prod)
+      #   run: |
+      #     curl -s -X POST "${{ secrets.PORTAINER_WEBHOOK_PROD }}"
